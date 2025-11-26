@@ -2,7 +2,6 @@ package etl
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 )
@@ -151,12 +150,12 @@ func New[S, T any](
 // Submit 动态提交任务到 Pipeline。
 // 如果 Pipeline 正在运行，任务会被 Worker 拾取。
 // 如果队列已满，返回 error。
-func (p *Pipeline[S, T]) Submit(e Extractor[S]) error {
+func (p *Pipeline[S, T]) Submit(e Extractor[S]) bool {
 	select {
 	case p.taskCh <- e:
-		return nil
+		return true
 	default:
-		return errors.New("etl: task queue is full")
+		return false
 	}
 }
 
