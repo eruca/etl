@@ -87,7 +87,7 @@ func TestPipeline_BasicFlow(t *testing.T) {
 
 	// 动态提交任务
 	input := []int{1, 2, 3, 4, 5}
-	p.Submit(&MockExtractor{Data: input})
+	p.Submit(&MockExtractor{Data: input}, 3, time.Millisecond*50)
 
 	// 稍微等待处理，然后关闭
 	time.Sleep(100 * time.Millisecond)
@@ -140,7 +140,7 @@ func TestPipeline_Interceptor(t *testing.T) {
 
 	// 提交 1-10
 	input := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
-	p.Submit(&MockExtractor{Data: input})
+	p.Submit(&MockExtractor{Data: input}, 3, time.Millisecond*50)
 
 	time.Sleep(50 * time.Millisecond)
 	p.Shutdown()
@@ -185,7 +185,7 @@ func TestPipeline_ConcurrencyAndStress(t *testing.T) {
 			defer wgSub.Done()
 			// 每个任务包含 100 个数据
 			data := make([]int, 100)
-			p.Submit(&MockExtractor{Data: data})
+			p.Submit(&MockExtractor{Data: data}, 3, time.Millisecond*50)
 		}()
 	}
 	wgSub.Wait()
@@ -216,9 +216,9 @@ func TestPipeline_ErrorHandling(t *testing.T) {
 	go func() { errCh <- p.Run(context.Background()) }()
 
 	// 提交正常数据
-	p.Submit(&MockExtractor{Data: []int{1, 2}})
+	p.Submit(&MockExtractor{Data: []int{1, 2}}, 3, time.Millisecond*50)
 	// 提交触发错误的数据 (-1)
-	p.Submit(&MockExtractor{Data: []int{-1}})
+	p.Submit(&MockExtractor{Data: []int{-1}}, 3, time.Millisecond*50)
 
 	// 这里不需要调用 Shutdown，因为错误发生时 Run 会自动退出
 	err := <-errCh

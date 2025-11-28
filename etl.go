@@ -3,7 +3,9 @@ package etl
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
+	"time"
 )
 
 // =================================================================================
@@ -150,13 +152,23 @@ func New[S, T any](
 // Submit 动态提交任务到 Pipeline。
 // 如果 Pipeline 正在运行，任务会被 Worker 拾取。
 // 如果队列已满，返回 error。
-func (p *Pipeline[S, T]) Submit(e Extractor[S]) bool {
-	select {
-	case p.taskCh <- e:
-		return true
-	default:
-		return false
+func (p *Pipeline[S, T]) Submit(e Extractor[S], retry int, delay time.Duration) error {
+	if retry < 1 {
+		panic("retry必须大于等于1")
 	}
+
+	for i := 0; i < retry; i++ {
+		select {
+		case p.taskCh <- e:
+			slog.Info("pipeline submit success")
+			return nil
+		default:
+			slog.Error("pipeline submit failed sleep for a while", "i", i)
+			time.Sleep(delay)
+		}
+	}
+
+	return fmt.Errorf("submit %dtimes failed", retry)
 }
 
 // Shutdown 优雅关闭：停止接收新任务。
@@ -191,6 +203,7 @@ func (p *Pipeline[S, T]) chainInterceptors(base Emitter[S]) Emitter[S] {
 // Run 启动服务 (阻塞调用)。
 // 直到 Shutdown 被调用且所有任务完成，或发生错误，Context 取消时返回。
 func (p *Pipeline[S, T]) Run(ctx context.Context) error {
+	slog.Info("Pipeline.Run start")
 	// 创建可取消的上下文，任何阶段出错都会触发整体 Cancel
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -208,10 +221,12 @@ func (p *Pipeline[S, T]) Run(ctx context.Context) error {
 
 	for i := 0; i < p.opts.extractConcurrency; i++ {
 		go func(workerID int) {
+			slog.Info("pipeline.Run extractor start to work", "workId", workerID)
 			defer wgExtract.Done()
 
 			// Worker 持续消费任务队列
 			for ext := range p.taskCh {
+				slog.Info("pipeline.Run extractor receive message", "ext", ext)
 				if ctx.Err() != nil {
 					return
 				}
@@ -246,22 +261,27 @@ func (p *Pipeline[S, T]) Run(ctx context.Context) error {
 	wgTransform.Add(p.opts.transformConcurrency)
 
 	for i := 0; i < p.opts.transformConcurrency; i++ {
-		go func() {
+		go func(workId int) {
 			defer wgTransform.Done()
 
 			// 持续消费源数据
 			for src := range sourceCh {
+				slog.Info("etl.transformer receive msg", "workId", workId)
 				if ctx.Err() != nil {
+					slog.Error("etl.transformer ctx.Erred", "err", ctx.Err())
 					return
 				}
 
+				slog.Info("etl.transformer start transform", "workId", workId)
 				// 执行转换
 				res, err := p.transformer.Transform(ctx, src)
 				if err != nil {
 					p.trySendError(errCh, fmt.Errorf("transform failed: %w", err))
 					cancel()
+					slog.Error("etl.transformer transform errored", "workId", workId, "err", err)
 					return
 				}
+				slog.Info("etl.transformer transform end", "workId", workId)
 
 				// 发送结果 (带 Context 检查的发送)
 				select {
@@ -270,7 +290,7 @@ func (p *Pipeline[S, T]) Run(ctx context.Context) error {
 					return
 				}
 			}
-		}()
+		}(i)
 	}
 
 	// 监控 Stage 2 完成
@@ -286,7 +306,8 @@ func (p *Pipeline[S, T]) Run(ctx context.Context) error {
 	wgLoad.Add(p.opts.loadConcurrency)
 
 	for i := 0; i < p.opts.loadConcurrency; i++ {
-		go func() {
+		go func(wkId int) {
+			slog.Info("etl.load start", "workId", wkId)
 			defer wgLoad.Done()
 
 			for target := range targetCh {
@@ -301,26 +322,27 @@ func (p *Pipeline[S, T]) Run(ctx context.Context) error {
 					return
 				}
 			}
-		}()
+		}(i)
 	}
 
 	// 等待加载完成的信号
-	doneCh := make(chan struct{})
 	go func() {
+		defer close(errCh)
 		wgLoad.Wait()
-		close(doneCh)
 	}()
 
 	// ---------------------------------------------------------
 	// Main Wait Loop
 	// ---------------------------------------------------------
+	slog.Info("etl.Wait For all pipeline finished")
 	select {
-	case err := <-errCh:
+	case err, ok := <-errCh:
+		if !ok {
+			return nil
+		}
 		return err // 发生错误
 	case <-ctx.Done():
 		return ctx.Err() // 外部取消
-	case <-doneCh:
-		return nil // 正常结束 (所有任务处理完毕)
 	}
 }
 
